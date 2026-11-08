@@ -1,4 +1,4 @@
-skip_local_validator = true
+ip_local_validator = true
 
 [toolchain]
 
@@ -6,11 +6,11 @@ skip_local_validator = true
 resolution = true
 skip-lint = false
 
-[programs.localnet]
+[programs.devnet]
 trustfund = "CYyMeWq69riVG1RSHQYQArWc2TTyB7DxWBULvu2UxGF9"
 
 [provider]
-cluster = "localnet"
+cluster = "devnet"
 wallet = "~/.config/solana/id.json"
 
 [scripts]
