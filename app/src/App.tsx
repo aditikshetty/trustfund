@@ -1,5 +1,7 @@
 
 import { useEffect, useMemo, useState } from 'react'
+import type { FormEvent } from 'react'
+
 import {
   ArrowRight,
   ArrowUpRight,
@@ -18,7 +20,15 @@ import {
 } from '@solana/wallet-adapter-react'
 
 import { useWalletModal } from '@solana/wallet-adapter-react-ui'
-import { LAMPORTS_PER_SOL, PublicKey } from '@solana/web3.js'
+
+import {
+  LAMPORTS_PER_SOL,
+  PublicKey,
+  SystemProgram,
+} from '@solana/web3.js'
+
+import { BN } from '@coral-xyz/anchor'
+import { Buffer } from 'buffer'
 import { getTrustFundProgram } from './lib/anchor'
 
 type CampaignView = {
@@ -29,6 +39,7 @@ type CampaignView = {
   title: string
   description: string
   raised: number
+  withdrawn: number
   goal: number
   deadline: number
   image: string
@@ -44,6 +55,7 @@ const DEMO_CAMPAIGNS: CampaignView[] = [
     description:
       'Give children the books, supplies and opportunities they deserve.',
     raised: 3.2,
+    withdrawn: 0,
     goal: 5,
     deadline: 0,
     image:
@@ -58,6 +70,7 @@ const DEMO_CAMPAIGNS: CampaignView[] = [
     description:
       'Help families access essential medical care and treatment.',
     raised: 4.5,
+    withdrawn: 0,
     goal: 6,
     deadline: 0,
     image:
@@ -72,6 +85,7 @@ const DEMO_CAMPAIGNS: CampaignView[] = [
     description:
       'Support tree planting and create a cleaner environment.',
     raised: 2.7,
+    withdrawn: 0,
     goal: 4,
     deadline: 0,
     image:
@@ -82,14 +96,48 @@ const DEMO_CAMPAIGNS: CampaignView[] = [
 const DEFAULT_CAMPAIGN_IMAGE =
   'https://images.unsplash.com/photo-1488521787991-ed7bbaae773c?auto=format&fit=crop&w=900&q=85'
 
-// Converts Anchor BN/u64 values into JavaScript numbers.
+const PROGRAM_ID = new PublicKey(
+  'CYyMeWq69riVG1RSHQYQArWc2TTyB7DxWBULvu2UxGF9',
+)
+
 function toNumber(value: unknown): number {
   if (value === null || value === undefined) return 0
-
   return Number(value.toString())
 }
 
+function getLocalDateTimeMin() {
+  const date = new Date(Date.now() + 60000)
+  const offset = date.getTimezoneOffset()
+
+  const localDate = new Date(
+    date.getTime() - offset * 60 * 1000,
+  )
+
+  return localDate.toISOString().slice(0, 16)
+}
+
 function App() {
+  // Campaign creation state
+  const [showCreateForm, setShowCreateForm] = useState(false)
+  const [campaignTitle, setCampaignTitle] = useState('')
+  const [campaignDescription, setCampaignDescription] = useState('')
+  const [campaignGoal, setCampaignGoal] = useState('')
+  const [campaignDeadline, setCampaignDeadline] = useState('')
+  const [creatingCampaign, setCreatingCampaign] = useState(false)
+
+  // Donation state
+  const [donationAmounts, setDonationAmounts] = useState<
+    Record<string, string>
+  >({})
+  const [donatingCampaign, setDonatingCampaign] = useState('')
+
+  // Withdrawal state
+  const [withdrawalAmounts, setWithdrawalAmounts] = useState<
+    Record<string, string>
+  >({})
+  const [withdrawingCampaign, setWithdrawingCampaign] = useState('')
+
+  // General application state
   const [menuOpen, setMenuOpen] = useState(false)
   const [notice, setNotice] = useState('')
   const [liveCampaigns, setLiveCampaigns] =
@@ -97,7 +145,7 @@ function App() {
   const [loadingCampaigns, setLoadingCampaigns] = useState(false)
   const [campaignError, setCampaignError] = useState('')
 
-  // Wallet connection
+  // Wallet
   const { publicKey, connected, disconnect } = useWallet()
   const { setVisible } = useWalletModal()
   const anchorWallet = useAnchorWallet()
@@ -109,7 +157,7 @@ function App() {
     ? `${walletAddress.slice(0, 4)}...${walletAddress.slice(-4)}`
     : ''
 
-  // Create Anchor program client
+  // Anchor client
   const program = useMemo(
     () =>
       anchorWallet
@@ -118,7 +166,7 @@ function App() {
     [connection, anchorWallet],
   )
 
-  // Fetch real campaigns from Solana Devnet
+  // Fetch live campaigns
   useEffect(() => {
     if (!program || !anchorWallet) {
       setLiveCampaigns(null)
@@ -134,35 +182,30 @@ function App() {
       setCampaignError('')
 
       try {
-        // Fetch all Campaign accounts owned by the TrustFund program.
         const accounts = await (
           program!.account as any
         ).campaign.all()
 
         const mappedCampaigns: CampaignView[] = accounts.map(
-          (item: {
-            publicKey: PublicKey
-            account: {
-              owner: PublicKey
-              campaignId: unknown
-              title: string
-              description: string
-              goal: unknown
-              raised: unknown
-              deadline: unknown
-            }
-          }) => {
+          (item: any) => {
             const account = item.account
 
             return {
               address: item.publicKey.toBase58(),
               owner: account.owner.toBase58(),
-              campaignId: String(account.campaignId),
+              campaignId: account.campaignId.toString(),
               category: 'Community',
               title: account.title,
               description: account.description,
-              goal: toNumber(account.goal) / LAMPORTS_PER_SOL,
-              raised: toNumber(account.raised) / LAMPORTS_PER_SOL,
+              goal:
+                toNumber(account.goal) /
+                LAMPORTS_PER_SOL,
+              raised:
+                toNumber(account.raised) /
+                LAMPORTS_PER_SOL,
+              withdrawn:
+                toNumber(account.withdrawn) /
+                LAMPORTS_PER_SOL,
               deadline: toNumber(account.deadline),
               image: DEFAULT_CAMPAIGN_IMAGE,
             }
@@ -173,7 +216,7 @@ function App() {
           setLiveCampaigns(mappedCampaigns)
         }
       } catch (error) {
-        console.error('Failed to fetch TrustFund campaigns:', error)
+        console.error('Failed to fetch campaigns:', error)
 
         if (!cancelled) {
           setCampaignError(
@@ -197,12 +240,11 @@ function App() {
     }
   }, [program, anchorWallet])
 
-  // Show real campaigns when connected.
-  // Demo campaigns are only shown when disconnected.
   const displayedCampaigns = connected
     ? liveCampaigns ?? []
     : DEMO_CAMPAIGNS
 
+  // Wallet connect/disconnect
   const handleWalletClick = async () => {
     if (connected) {
       try {
@@ -219,48 +261,431 @@ function App() {
     setMenuOpen(false)
   }
 
-  const handleRefresh = () => {
-    if (connected && program) {
-      setLiveCampaigns(null)
-      setCampaignError('')
+  // Refresh live campaigns
+  const handleRefresh = async () => {
+    if (!connected || !program) return
 
-      // The wallet/program effect will fetch again when its dependencies change.
-      // A page reload is not needed for normal campaign updates.
-      void (async () => {
-        try {
-          setLoadingCampaigns(true)
+    setLoadingCampaigns(true)
+    setCampaignError('')
 
-          const accounts = await (
-            program.account as any
-          ).campaign.all()
+    try {
+      const accounts = await (
+        program.account as any
+      ).campaign.all()
 
-          const mapped: CampaignView[] = accounts.map(
-            (item: any) => ({
-              address: item.publicKey.toBase58(),
-              owner: item.account.owner.toBase58(),
-              campaignId: item.account.campaignId.toString(),
-              category: 'Community',
-              title: item.account.title,
-              description: item.account.description,
-              goal:
-                toNumber(item.account.goal) /
-                LAMPORTS_PER_SOL,
-              raised:
-                toNumber(item.account.raised) /
-                LAMPORTS_PER_SOL,
-              deadline: toNumber(item.account.deadline),
-              image: DEFAULT_CAMPAIGN_IMAGE,
-            }),
+      const mapped: CampaignView[] = accounts.map(
+        (item: any) => ({
+          address: item.publicKey.toBase58(),
+          owner: item.account.owner.toBase58(),
+          campaignId: item.account.campaignId.toString(),
+          category: 'Community',
+          title: item.account.title,
+          description: item.account.description,
+          goal:
+            toNumber(item.account.goal) /
+            LAMPORTS_PER_SOL,
+          raised:
+            toNumber(item.account.raised) /
+            LAMPORTS_PER_SOL,
+          withdrawn:
+            toNumber(item.account.withdrawn) /
+            LAMPORTS_PER_SOL,
+          deadline: toNumber(item.account.deadline),
+          image: DEFAULT_CAMPAIGN_IMAGE,
+        }),
+      )
+
+      setLiveCampaigns(mapped)
+    } catch (error) {
+      console.error('Unable to refresh campaigns:', error)
+
+      setCampaignError(
+        error instanceof Error
+          ? error.message
+          : 'Unable to refresh campaigns.',
+      )
+    } finally {
+      setLoadingCampaigns(false)
+    }
+  }
+
+  // Create campaign
+  const handleCreateCampaign = async (
+    event: FormEvent<HTMLFormElement>,
+  ) => {
+    event.preventDefault()
+
+    if (!program || !publicKey || !connected) {
+      setNotice('Connect your Phantom wallet first.')
+      return
+    }
+
+    if (
+      creatingCampaign ||
+      donatingCampaign !== '' ||
+      withdrawingCampaign !== ''
+    ) return
+
+    const title = campaignTitle.trim()
+    const description = campaignDescription.trim()
+    const goal = Number(campaignGoal)
+
+    const deadlineMilliseconds = new Date(
+      campaignDeadline,
+    ).getTime()
+
+    const deadlineSeconds = Math.floor(
+      deadlineMilliseconds / 1000,
+    )
+
+    if (!title || title.length > 50) {
+      setNotice('Title must contain 1–50 characters.')
+      return
+    }
+
+    if (!description || description.length > 280) {
+      setNotice('Description must contain 1–280 characters.')
+      return
+    }
+
+    if (!Number.isFinite(goal) || goal <= 0) {
+      setNotice('Enter a valid fundraising goal in SOL.')
+      return
+    }
+
+    if (
+      !Number.isFinite(deadlineMilliseconds) ||
+      deadlineSeconds <= Math.floor(Date.now() / 1000)
+    ) {
+      setNotice('Please select a future deadline.')
+      return
+    }
+
+    const goalLamports = Math.round(
+      goal * LAMPORTS_PER_SOL,
+    )
+
+    if (
+      !Number.isSafeInteger(goalLamports) ||
+      goalLamports <= 0
+    ) {
+      setNotice('The fundraising goal is invalid or too large.')
+      return
+    }
+
+    setCreatingCampaign(true)
+    setNotice('Preparing your campaign transaction...')
+
+    try {
+      const accounts = await (
+        program.account as any
+      ).campaign.all()
+
+      const ownerCampaigns = accounts.filter(
+        (item: any) =>
+          item.account.owner.toBase58() ===
+          publicKey.toBase58(),
+      )
+
+      const maxId = ownerCampaigns.reduce(
+        (max: bigint, item: any) => {
+          const id = BigInt(
+            item.account.campaignId.toString(),
           )
+          return id > max ? id : max
+        },
+        0n,
+      )
 
-          setLiveCampaigns(mapped)
-        } catch (error) {
-          console.error(error)
-          setCampaignError('Unable to refresh campaigns.')
-        } finally {
-          setLoadingCampaigns(false)
-        }
-      })()
+      const nextId = maxId + 1n
+
+      const [campaignPda] =
+        PublicKey.findProgramAddressSync(
+          [
+            Buffer.from('campaign'),
+            publicKey.toBuffer(),
+            new BN(nextId.toString()).toArrayLike(
+              Buffer,
+              'le',
+              8,
+            ),
+          ],
+          PROGRAM_ID,
+        )
+
+      setNotice('Please approve the transaction in Phantom.')
+
+      const signature = await (
+        program.methods as any
+      )
+        .createCampaign(
+          new BN(nextId.toString()),
+          title,
+          description,
+          new BN(goalLamports.toString()),
+          new BN(deadlineSeconds.toString()),
+        )
+        .accounts({
+          owner: publicKey,
+          campaign: campaignPda,
+          systemProgram: SystemProgram.programId,
+        })
+        .rpc()
+
+      await connection.confirmTransaction(
+        signature,
+        'confirmed',
+      )
+
+      setNotice(
+        `Campaign created successfully! Transaction: ${signature}`,
+      )
+
+      setCampaignTitle('')
+      setCampaignDescription('')
+      setCampaignGoal('')
+      setCampaignDeadline('')
+      setShowCreateForm(false)
+
+      await handleRefresh()
+    } catch (error) {
+      console.error('Campaign creation failed:', error)
+
+      setNotice(
+        error instanceof Error
+          ? `Campaign creation failed: ${error.message}`
+          : 'Campaign creation failed. Check the browser console.',
+      )
+    } finally {
+      setCreatingCampaign(false)
+    }
+  }
+
+  // Donate to a campaign
+  const handleDonate = async (
+    campaign: CampaignView,
+  ) => {
+    if (!program || !publicKey || !connected) {
+      setNotice('Connect your Phantom wallet first.')
+      return
+    }
+
+    if (
+      donatingCampaign !== '' ||
+      creatingCampaign ||
+      withdrawingCampaign !== ''
+    ) return
+
+    const amount = Number(
+      donationAmounts[campaign.address],
+    )
+
+    if (!Number.isFinite(amount) || amount <= 0) {
+      setNotice('Enter a valid donation amount in SOL.')
+      return
+    }
+
+    const amountLamports = Math.round(
+      amount * LAMPORTS_PER_SOL,
+    )
+
+    if (
+      !Number.isSafeInteger(amountLamports) ||
+      amountLamports <= 0
+    ) {
+      setNotice('Invalid donation amount.')
+      return
+    }
+
+    const remainingGoal =
+      campaign.goal - campaign.raised
+
+    if (amountLamports > Math.round(
+      Math.max(0, remainingGoal) * LAMPORTS_PER_SOL,
+    )) {
+      setNotice(
+        `Only ${Math.max(0, remainingGoal).toFixed(6)} SOL remains to reach the goal.`,
+      )
+      return
+    }
+
+    if (
+      campaign.deadline <=
+      Math.floor(Date.now() / 1000)
+    ) {
+      setNotice('This campaign has already ended.')
+      return
+    }
+
+    setDonatingCampaign(campaign.address)
+    setNotice('Preparing your donation transaction...')
+
+    try {
+      const campaignPda = new PublicKey(
+        campaign.address,
+      )
+
+      const [vaultPda] =
+        PublicKey.findProgramAddressSync(
+          [
+            Buffer.from('vault'),
+            campaignPda.toBuffer(),
+          ],
+          PROGRAM_ID,
+        )
+
+      setNotice('Please approve your donation in Phantom.')
+
+      const signature = await (
+        program.methods as any
+      )
+        .donate(new BN(amountLamports.toString()))
+        .accounts({
+          donor: publicKey,
+          campaign: campaignPda,
+          vault: vaultPda,
+          systemProgram: SystemProgram.programId,
+        })
+        .rpc()
+
+      await connection.confirmTransaction(
+        signature,
+        'confirmed',
+      )
+
+      setNotice(
+        `Donation successful! ${amount} SOL donated. Transaction: ${signature}`,
+      )
+
+      setDonationAmounts((previous) => ({
+        ...previous,
+        [campaign.address]: '',
+      }))
+
+      await handleRefresh()
+    } catch (error) {
+      console.error('Donation failed:', error)
+
+      setNotice(
+        error instanceof Error
+          ? `Donation failed: ${error.message}`
+          : 'Donation failed. Check the browser console.',
+      )
+    } finally {
+      setDonatingCampaign('')
+    }
+  }
+
+  // Withdraw funds from a campaign
+  const handleWithdraw = async (
+    campaign: CampaignView,
+  ) => {
+    if (!program || !publicKey || !connected) {
+      setNotice('Connect your Phantom wallet first.')
+      return
+    }
+
+    if (
+      withdrawingCampaign !== '' ||
+      donatingCampaign !== '' ||
+      creatingCampaign
+    ) return
+
+    const amount = Number(
+      withdrawalAmounts[campaign.address],
+    )
+
+    if (!Number.isFinite(amount) || amount <= 0) {
+      setNotice('Enter a valid withdrawal amount in SOL.')
+      return
+    }
+
+    const amountLamports = Math.round(
+      amount * LAMPORTS_PER_SOL,
+    )
+
+    if (
+      !Number.isSafeInteger(amountLamports) ||
+      amountLamports <= 0
+    ) {
+      setNotice('Invalid withdrawal amount.')
+      return
+    }
+
+    const availableLamports = Math.max(
+      0,
+      Math.round(
+        (campaign.raised - campaign.withdrawn) *
+          LAMPORTS_PER_SOL,
+      ),
+    )
+
+    if (amountLamports > availableLamports) {
+      setNotice(
+        `Only ${(availableLamports / LAMPORTS_PER_SOL).toFixed(6)} SOL is available to withdraw.`,
+      )
+      return
+    }
+
+    if (campaign.owner !== publicKey.toBase58()) {
+      setNotice('Only the campaign owner can withdraw funds.')
+      return
+    }
+
+    try {
+      setWithdrawingCampaign(campaign.address)
+      setNotice('Preparing withdrawal transaction...')
+
+      const campaignPda = new PublicKey(campaign.address)
+
+      const [vaultPda] =
+        PublicKey.findProgramAddressSync(
+          [
+            Buffer.from('vault'),
+            campaignPda.toBuffer(),
+          ],
+          PROGRAM_ID,
+        )
+
+      setNotice('Please approve the withdrawal in Phantom.')
+
+      const signature = await (
+        program.methods as any
+      )
+        .withdraw(new BN(amountLamports.toString()))
+        .accounts({
+          owner: publicKey,
+          campaign: campaignPda,
+          vault: vaultPda,
+          systemProgram: SystemProgram.programId,
+        })
+        .rpc()
+
+      await connection.confirmTransaction(
+        signature,
+        'confirmed',
+      )
+
+      setNotice(
+        `Withdrawal successful! ${amount.toFixed(6)} SOL withdrawn. Transaction: ${signature}`,
+      )
+
+      setWithdrawalAmounts((previous) => ({
+        ...previous,
+        [campaign.address]: '',
+      }))
+
+      await handleRefresh()
+    } catch (error) {
+      console.error('Withdrawal failed:', error)
+
+      setNotice(
+        error instanceof Error
+          ? `Withdrawal failed: ${error.message}`
+          : 'Withdrawal failed. Check the browser console.',
+      )
+    } finally {
+      setWithdrawingCampaign('')
     }
   }
 
@@ -347,8 +772,8 @@ function App() {
 
       {/* NOTIFICATION */}
       {notice && (
-        <div className="mx-auto flex max-w-7xl items-center justify-between px-6 py-3 text-sm text-[#174c3b]">
-          <span>{notice}</span>
+        <div className="mx-auto flex max-w-7xl items-center justify-between gap-4 px-6 py-3 text-sm text-[#174c3b]">
+          <span className="break-all">{notice}</span>
 
           <button
             onClick={() => setNotice('')}
@@ -527,7 +952,12 @@ function App() {
               {connected && (
                 <button
                   onClick={handleRefresh}
-                  disabled={loadingCampaigns}
+                  disabled={
+                    loadingCampaigns ||
+                    creatingCampaign ||
+                    donatingCampaign !== '' ||
+                    withdrawingCampaign !== ''
+                  }
                   className="inline-flex items-center gap-2 text-sm font-semibold text-[#287354] disabled:opacity-50"
                 >
                   <RefreshCw
@@ -572,6 +1002,125 @@ function App() {
             </div>
           )}
 
+          {/* CREATE CAMPAIGN BUTTON */}
+          {connected && (
+            <div className="mt-8">
+              <button
+                type="button"
+                onClick={() => setShowCreateForm(!showCreateForm)}
+                disabled={
+                  creatingCampaign ||
+                  donatingCampaign !== '' ||
+                  withdrawingCampaign !== ''
+                }
+                className="rounded-lg bg-[#174c3b] px-6 py-3 text-sm font-semibold text-white transition hover:bg-[#23644d] disabled:opacity-50"
+              >
+                {showCreateForm ? 'Cancel' : '+ Create a Campaign'}
+              </button>
+            </div>
+          )}
+
+          {/* CREATE CAMPAIGN FORM */}
+          {connected && showCreateForm && (
+            <form
+              onSubmit={handleCreateCampaign}
+              className="mt-6 max-w-2xl space-y-5 rounded-2xl border border-[#dce8dc] bg-white/85 p-6 shadow-lg"
+            >
+              <div>
+                <h3 className="text-2xl font-bold">
+                  Start a Campaign
+                </h3>
+                <p className="mt-2 text-sm text-[#829087]">
+                  Create a fundraising campaign on Solana Devnet.
+                </p>
+              </div>
+
+              <div>
+                <label className="mb-2 block text-sm font-semibold">
+                  Campaign title
+                </label>
+                <input
+                  required
+                  maxLength={50}
+                  value={campaignTitle}
+                  onChange={(e) => setCampaignTitle(e.target.value)}
+                  placeholder="What are you raising funds for?"
+                  className="w-full rounded-lg border border-[#cbd8ce] p-3 outline-none focus:border-[#399b7b]"
+                />
+                <p className="mt-1 text-xs text-[#829087]">
+                  {campaignTitle.length}/50 characters
+                </p>
+              </div>
+
+              <div>
+                <label className="mb-2 block text-sm font-semibold">
+                  Description
+                </label>
+                <textarea
+                  required
+                  maxLength={280}
+                  rows={4}
+                  value={campaignDescription}
+                  onChange={(e) => setCampaignDescription(e.target.value)}
+                  placeholder="Explain why this cause matters..."
+                  className="w-full rounded-lg border border-[#cbd8ce] p-3 outline-none focus:border-[#399b7b]"
+                />
+                <p className="mt-1 text-xs text-[#829087]">
+                  {campaignDescription.length}/280 characters
+                </p>
+              </div>
+
+              <div>
+                <label className="mb-2 block text-sm font-semibold">
+                  Fundraising goal (SOL)
+                </label>
+                <input
+                  required
+                  type="number"
+                  min="0.000000001"
+                  step="0.000000001"
+                  value={campaignGoal}
+                  onChange={(e) => setCampaignGoal(e.target.value)}
+                  placeholder="e.g. 2"
+                  className="w-full rounded-lg border border-[#cbd8ce] p-3 outline-none focus:border-[#399b7b]"
+                />
+              </div>
+
+              <div>
+                <label className="mb-2 block text-sm font-semibold">
+                  Campaign deadline
+                </label>
+                <input
+                  required
+                  type="datetime-local"
+                  value={campaignDeadline}
+                  onChange={(e) => setCampaignDeadline(e.target.value)}
+                  min={getLocalDateTimeMin()}
+                  className="w-full rounded-lg border border-[#cbd8ce] p-3 outline-none focus:border-[#399b7b]"
+                />
+              </div>
+
+              <button
+                type="submit"
+                disabled={
+                  creatingCampaign ||
+                  donatingCampaign !== '' ||
+                  withdrawingCampaign !== ''
+                }
+                className="w-full rounded-lg bg-[#174c3b] py-3 font-semibold text-white transition hover:bg-[#23644d] disabled:cursor-not-allowed disabled:opacity-50"
+              >
+                {creatingCampaign
+                  ? 'Creating campaign...'
+                  : 'Create Campaign'}
+              </button>
+
+              <p className="text-xs text-[#829087]">
+                Phantom will ask you to approve the transaction.
+                Devnet SOL is used for testing.
+              </p>
+            </form>
+          )}
+
           {/* CAMPAIGN CARDS */}
           <div className="mt-12 grid gap-8 md:grid-cols-2 lg:grid-cols-3">
             {displayedCampaigns.map((campaign) => {
@@ -582,6 +1131,25 @@ function App() {
                       100,
                     )
                   : 0
+
+              const remainingGoal = Math.max(
+                0,
+                campaign.goal - campaign.raised,
+              )
+
+              const availableToWithdraw = Math.max(
+                0,
+                campaign.raised - campaign.withdrawn,
+              )
+
+              const isCampaignOwner =
+                connected &&
+                publicKey !== null &&
+                campaign.owner === publicKey.toBase58()
+
+              const campaignEnded =
+                campaign.deadline <=
+                Math.floor(Date.now() / 1000)
 
               return (
                 <article
@@ -626,22 +1194,153 @@ function App() {
                       />
                     </div>
 
-                    <div className="mt-2 text-right text-xs font-medium text-[#399b7b]">
-                      {Math.round(percentage)}% funded
+                    <div className="mt-2 flex justify-between text-xs font-medium">
+                      <span className="text-[#399b7b]">
+                        {Math.round(percentage)}% funded
+                      </span>
+                      <span className="text-[#829087]">
+                        {remainingGoal.toFixed(3)} SOL remaining
+                      </span>
                     </div>
 
-                    <button
-                      onClick={() =>
-                        setNotice(
-                          connected
-                            ? 'Campaign donations will be enabled in the next integration step.'
-                            : 'Connect your Phantom wallet to interact with live campaigns.',
-                        )
-                      }
-                      className="mt-6 flex w-full items-center justify-center gap-2 rounded-lg bg-[#174c3b] py-3 text-sm font-semibold text-white transition hover:bg-[#23644d]"
-                    >
-                      Support this cause <ArrowUpRight size={17} />
-                    </button>
+                    {/* DONATION INPUT */}
+                    {connected && campaign.address.startsWith('demo-') ? (
+                      <p className="mt-6 text-xs text-[#829087]">
+                        This is a demonstration campaign. Only live
+                        on-chain campaigns can receive donations.
+                      </p>
+                    ) : (
+                      <div className="mt-6 space-y-3">
+                        <label className="block text-sm font-semibold">
+                          Donation amount (SOL)
+                        </label>
+
+                        <input
+                          type="number"
+                          min="0.000000001"
+                          step="0.000000001"
+                          placeholder="e.g. 0.01"
+                          value={
+                            donationAmounts[campaign.address] ?? ''
+                          }
+                          onChange={(e) =>
+                            setDonationAmounts((previous) => ({
+                              ...previous,
+                              [campaign.address]: e.target.value,
+                            }))
+                          }
+                          disabled={
+                            !connected ||
+                            donatingCampaign !== '' ||
+                            creatingCampaign ||
+                            withdrawingCampaign !== '' ||
+                            campaignEnded ||
+                            remainingGoal <= 0
+                          }
+                          className="w-full rounded-lg border border-[#cbd8ce] p-3 outline-none focus:border-[#399b7b] disabled:opacity-50"
+                        />
+
+                        <button
+                          type="button"
+                          onClick={() => void handleDonate(campaign)}
+                          disabled={
+                            !connected ||
+                            donatingCampaign !== '' ||
+                            creatingCampaign ||
+                            withdrawingCampaign !== '' ||
+                            campaignEnded ||
+                            remainingGoal <= 0 ||
+                            !donationAmounts[campaign.address]
+                          }
+                          className="flex w-full items-center justify-center gap-2 rounded-lg bg-[#174c3b] py-3 text-sm font-semibold text-white transition hover:bg-[#23644d] disabled:cursor-not-allowed disabled:opacity-50"
+                        >
+                          {donatingCampaign === campaign.address
+                            ? 'Processing donation...'
+                            : campaignEnded
+                              ? 'Campaign ended'
+                              : remainingGoal <= 0
+                                ? 'Goal reached'
+                                : !connected
+                                  ? 'Connect Wallet to Donate'
+                                  : 'Donate SOL'}
+
+                          <ArrowUpRight size={17} />
+                        </button>
+                      </div>
+                    )}
+
+                    {/* OWNER WITHDRAWAL SECTION */}
+                    {isCampaignOwner && (
+                      <div className="mt-6 space-y-3 rounded-xl border border-[#cbd8ce] bg-[#f3f7f1] p-4">
+                        <div>
+                          <h4 className="font-bold text-[#174c3b]">
+                            Campaign withdrawals
+                          </h4>
+
+                          <p className="mt-2 text-sm text-[#496458]">
+                            Available to withdraw:
+                          </p>
+
+                          <p className="mt-1 text-xl font-bold text-[#287354]">
+                            {availableToWithdraw.toFixed(6)} SOL
+                          </p>
+                        </div>
+
+                        <label className="block text-sm font-semibold">
+                          Withdrawal amount (SOL)
+                        </label>
+
+                        <input
+                          type="number"
+                          min="0.000000001"
+                          step="0.000000001"
+                          placeholder="e.g. 0.01"
+                          value={
+                            withdrawalAmounts[campaign.address] ?? ''
+                          }
+                          onChange={(e) =>
+                            setWithdrawalAmounts((previous) => ({
+                              ...previous,
+                              [campaign.address]: e.target.value,
+                            }))
+                          }
+                          disabled={
+                            withdrawingCampaign !== '' ||
+                            donatingCampaign !== '' ||
+                            creatingCampaign ||
+                            availableToWithdraw <= 0
+                          }
+                          className="w-full rounded-lg border border-[#cbd8ce] bg-white p-3 outline-none focus:border-[#399b7b] disabled:opacity-50"
+                        />
+
+                        <button
+                          type="button"
+                          onClick={() => void handleWithdraw(campaign)}
+                          disabled={
+                            withdrawingCampaign !== '' ||
+                            donatingCampaign !== '' ||
+                            creatingCampaign ||
+                            availableToWithdraw <= 0 ||
+                            !withdrawalAmounts[campaign.address]
+                          }
+                          className="flex w-full items-center justify-center gap-2 rounded-lg bg-[#287354] py-3 text-sm font-semibold text-white transition hover:bg-[#174c3b] disabled:cursor-not-allowed disabled:opacity-50"
+                        >
+                          {withdrawingCampaign === campaign.address
+                            ? 'Processing withdrawal...'
+                            : availableToWithdraw <= 0
+                              ? 'No funds available'
+                              : 'Withdraw SOL'}
+
+                          <Wallet size={17} />
+                        </button>
+
+                        <p className="text-xs leading-5 text-[#829087]">
+                          Withdrawals transfer campaign funds to the
+                          campaign owner's connected wallet. Phantom
+                          will ask you to approve the transaction.
+                        </p>
+                      </div>
+                    )}
                   </div>
                 </article>
               )
